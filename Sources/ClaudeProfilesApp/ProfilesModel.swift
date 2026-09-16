@@ -10,33 +10,25 @@ struct ProfileRow: Identifiable, Equatable {
     let seatTier: String?
     let isRunning: Bool
     let usage: UsageHistory?
-    /// Server-reported meters, when this profile has a usage token. Includes
-    /// per-model weekly windows and reset times, neither of which the local
-    /// history file records.
-    let live: LiveUsage?
     let projectCount: Int?
     /// The unmanaged default profile cannot be launched or renamed by this tool.
     let isDefault: Bool
 
-    var fiveHour: Double? { live?.meter("five_hour")?.utilization ?? usage?.current(.fiveHour) }
-    var weekly: Double? { live?.meter("seven_day")?.utilization ?? usage?.current(.sevenDay) }
+    var fiveHour: Double? { usage?.current(.fiveHour) }
+    var weekly: Double? { usage?.current(.sevenDay) }
 
-    /// Every meter beyond the two headline ones, live when available.
-    var detailMeters: [LiveMeter] {
-        if let live {
-            return live.meters.filter { $0.key != "five_hour" && $0.key != "seven_day" }
-        }
-        return extraWindows.map {
-            LiveMeter(key: $0.window.rawValue, title: $0.window.title,
-                      utilization: $0.value, resetsAt: nil)
-        }
+    /// A model- or feature-specific meter this account reports.
+    struct ExtraWindow: Identifiable, Equatable {
+        let window: UsageWindow
+        let value: Double
+        var id: String { window.rawValue }
     }
 
-    /// Model- and feature-specific meters, only when this account reports them.
-    var extraWindows: [(window: UsageWindow, value: Double)] {
+    /// Meters beyond the two headline ones, only when this account reports them.
+    var extraWindows: [ExtraWindow] {
         guard let usage else { return [] }
         return usage.reportedSecondaryWindows.compactMap { window in
-            usage.current(window).map { (window, $0) }
+            usage.current(window).map { ExtraWindow(window: window, value: $0) }
         }
     }
 }
@@ -60,8 +52,6 @@ final class ProfilesModel {
     private var timer: Timer?
     private var lastSessionScan: Date?
     private let alerts = UsageAlerts()
-    private var liveUsage: [UUID: LiveUsage] = [:]
-    private var lastLiveFetch: Date?
 
     /// The app rewrites usage roughly every few minutes; polling faster than
     /// that just burns wakeups for identical bytes.
@@ -92,7 +82,6 @@ final class ProfilesModel {
                 seatTier: identity?.seatTier,
                 isRunning: Launcher.isDefaultRunning,
                 usage: UsageReader.readDefault(),
-                live: liveUsage[ProfileStore.defaultPseudoID],
                 projectCount: fingerprint?.projects,
                 isDefault: true)
         ]
@@ -106,7 +95,6 @@ final class ProfilesModel {
                     seatTier: profile.identity?.seatTier,
                     isRunning: Launcher.isRunning(profile),
                     usage: UsageReader.read(for: profile),
-                    live: liveUsage[profile.id],
                     projectCount: profile.fingerprint?.projects,
                     isDefault: false))
         }
@@ -123,12 +111,6 @@ final class ProfilesModel {
         refreshLoginItemState()
         lastRefresh = .now
         alerts.evaluate(rows)
-
-        // Network fetch on a slower cadence than the local file poll.
-        if Date().timeIntervalSince(lastLiveFetch ?? .distantPast) > 300 {
-            lastLiveFetch = .now
-            Task { await refreshLiveUsage() }
-        }
     }
 
     /// Opens the window that owns a session. Cloud sessions are stamped with
@@ -138,28 +120,6 @@ final class ProfilesModel {
             let row = rows.first(where: { $0.id == profileID })
         else { return }
         launch(row)
-    }
-
-    private func refreshLiveUsage() async {
-        if let token = TokenStore.load(for: ProfileStore.defaultPseudoID) {
-            liveUsage[ProfileStore.defaultPseudoID] =
-                (try? await UsageAPI.fetch(token: token))
-                ?? liveUsage[ProfileStore.defaultPseudoID]
-        }
-        for profile in ProfileStore.all() {
-            guard let token = TokenStore.load(for: profile.id) else {
-                liveUsage[profile.id] = nil
-                continue
-            }
-            do {
-                liveUsage[profile.id] = try await UsageAPI.fetch(token: token)
-            } catch {
-                // A failed fetch keeps the last-known values rather than
-                // blanking the UI; local history still renders underneath.
-                liveUsage[profile.id] = liveUsage[profile.id]
-            }
-        }
-        refresh()
     }
 
     func launch(_ row: ProfileRow) {

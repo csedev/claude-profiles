@@ -39,6 +39,7 @@ public enum Paths {
 
     public enum GuardError: Error, CustomStringConvertible {
         case touchesDefaultState(URL)
+        case rootOverlapsDefaultState(URL)
 
         public var description: String {
             switch self {
@@ -47,26 +48,88 @@ public enum Paths {
                     refusing to touch default Claude state: \(url.path)
                       (this tool only ever writes under \(Paths.root.path))
                     """
+            case .rootOverlapsDefaultState(let url):
+                return """
+                    refusing to use \(url.path) as the profile store
+                      (\(rootEnvironmentKey) must not point at, above, or inside \
+                    ~/.claude, ~/.claude.json, or ~/Library/Application Support/Claude)
+                    """
             }
         }
+    }
+
+    /// Canonical form of a path that may not exist yet: the longest existing
+    /// prefix goes through `realpath(3)`, and the rest is appended unchanged.
+    /// Applied to both sides of every comparison below, so a store relocated
+    /// behind a symlink still passes, and a symlink planted inside the store
+    /// that points back at Claude's own state still fails — even for a file
+    /// that is about to be created.
+    ///
+    /// Foundation's `resolvingSymlinksInPath()` is not usable for this: it
+    /// resolves nothing when the full path does not exist, and strips the
+    /// `/private` prefix when it does, so two spellings of one location come
+    /// back in different forms.
+    static func resolved(_ url: URL) -> String {
+        var path = url.standardizedFileURL.path
+        var trailing: [String] = []
+        while true {
+            if let real = realpath(path, nil) {
+                defer { free(real) }
+                var result = String(cString: real)
+                for component in trailing.reversed() {
+                    result += result.hasSuffix("/") ? component : "/" + component
+                }
+                return result
+            }
+            let parent = (path as NSString).deletingLastPathComponent
+            guard !parent.isEmpty, parent != path else { return path }
+            trailing.append((path as NSString).lastPathComponent)
+            path = parent
+        }
+    }
+
+    static func isInside(_ path: String, _ ancestor: String) -> Bool {
+        path == ancestor || path.hasPrefix(ancestor == "/" ? "/" : ancestor + "/")
+    }
+
+    /// The managed root, after checking that it does not overlap Claude's own
+    /// state. `CLAUDE_PROFILES_ROOT` may relocate the store anywhere else, but
+    /// a root at, above, or inside `~/.claude` would turn the "under our root"
+    /// exemption in `assertNotDefaultState` into a bypass of it.
+    static func safeRoot() throws -> String {
+        let ourRoot = resolved(root)
+        let protected = [defaultConfigDir, defaultConfigJSON, defaultElectronDir].map(resolved)
+        for path in protected where isInside(path, ourRoot) || isInside(ourRoot, path) {
+            throw GuardError.rootOverlapsDefaultState(root)
+        }
+        return ourRoot
     }
 
     /// Hard guard on every write path. The tool exists to not destroy the
     /// default profile's state, so proximity to it is an error, not a warning.
     public static func assertNotDefaultState(_ url: URL) throws {
-        let target = url.standardizedFileURL.resolvingSymlinksInPath().path
-        let ourRoot = root.standardizedFileURL.path
+        let target = resolved(url)
+        let ourRoot = try safeRoot()
 
         // Anything under our own root is fine, even though it lives in $HOME.
-        if target == ourRoot || target.hasPrefix(ourRoot + "/") { return }
+        if isInside(target, ourRoot) { return }
 
-        let forbidden = [
-            defaultConfigDir, defaultConfigJSON, defaultElectronDir, home,
-        ].map { $0.standardizedFileURL.path }
-
-        for f in forbidden where target == f || target.hasPrefix(f + "/") {
+        let forbidden = [defaultConfigDir, defaultConfigJSON, defaultElectronDir, home]
+            .map(resolved)
+        for path in forbidden where isInside(target, path) {
             throw GuardError.touchesDefaultState(url)
         }
+    }
+
+    /// Creates a directory, and any missing parents, readable by this user
+    /// only — the same mode the profile directories get. The files inside
+    /// carry account identity, memories, and MCP server environments, and the
+    /// default `umask` would leave the directories listable by every local
+    /// user. Existing directories are left as they are.
+    public static func createPrivateDirectory(_ url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
     }
 }
 

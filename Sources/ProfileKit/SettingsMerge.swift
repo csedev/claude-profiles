@@ -169,17 +169,17 @@ public enum Journal {
                 profile?.label ?? "-", detail,
             ].joined(separator: "\t") + "\n"
 
-        try FileManager.default.createDirectory(
-            at: Paths.journalDir, withIntermediateDirectories: true)
         let file = Paths.journalDir.appending(path: "merge.log")
         try Paths.assertNotDefaultState(file)
+        try Paths.createPrivateDirectory(Paths.journalDir)
 
-        if let handle = try? FileHandle(forWritingTo: file) {
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: Data(line.utf8))
-        } else {
-            try Data(line.utf8).write(to: file)
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: file.path) {
+            fm.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
         }
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(line.utf8))
     }
 }

@@ -9,11 +9,12 @@ swift test
 ./Scripts/install.sh        # builds and installs to /Applications
 ```
 
-No third-party dependencies. Swift 6 / Xcode 26.
+No third-party dependencies. Swift 6; Xcode 16 or newer. CI builds on macOS 15
+and macOS 26.
 
-Some tests skip themselves when their environment is missing — the Keychain
-round-trip needs an unlocked login Keychain, and process detection needs the
-Claude desktop app actually running. They are meaningful locally and quiet in CI.
+One test skips itself when its environment is missing — process detection needs
+the Claude desktop app actually running. It is meaningful locally and quiet in
+CI.
 
 ## Layout
 
@@ -35,13 +36,42 @@ someone their accumulated project settings.
 **Sharing is allowlist-only.** `SettingsMerge.sharedProjectKeys` and
 `SharedAssets.shareableSettingsKeys` enumerate what crosses between profiles.
 Never invert these into denylists: an unknown key must stay local, so a future
-Claude Code release cannot silently leak new per-account state. `hooks` and `env`
-are excluded deliberately — the first would arm code execution in an account that
-never opted in, the second routinely holds secrets.
+Claude Code release cannot silently leak new per-account state. `hooks`,
+`statusLine`, `apiKeyHelper` and `env` are excluded deliberately — the first
+three each name a shell command Claude Code executes, so copying one would arm
+code execution in an account that never opted in; the last routinely holds
+secrets. Before adding a settings key, check whether its value is, or contains,
+a command.
 
-**The tool never handles credential material.** Isolation comes from pointing
-`CLAUDE_SECURESTORAGE_CONFIG_DIR` at a per-profile path; macOS does the rest.
-`Keychain.serviceName` only *computes* a name for diagnostics.
+**Everything written is private to the user.** Directories go through
+`Paths.createPrivateDirectory` (`0700`) and files through `AtomicWrite`
+(`0600`, and `usingNewMetadataOnly` so a replaced file does not keep a looser
+mode). The shared store holds MCP server environments; the default `umask`
+would leave it listable by every local user.
+
+**Path comparisons use `Paths.resolved`, not `resolvingSymlinksInPath()`.**
+Foundation's resolver leaves a path untouched when it does not exist yet and
+strips `/private` when it does, so two spellings of one location come back in
+different forms. `Paths.resolved` runs the longest existing prefix through
+`realpath(3)` and appends the rest. `Paths.safeRoot` also refuses a
+`CLAUDE_PROFILES_ROOT` that overlaps Claude's own state, because the "under our
+root" exemption would otherwise become a bypass.
+
+**Destructive commands resolve exactly.** `ProfileStore.resolve(_:exact:)`
+accepts a label prefix for convenience; `rm` passes `exact: true` so `rm w --yes`
+cannot expand to "work".
+
+**The launched app inherits nothing Claude Code reads.** `Launcher.childEnvironment`
+strips every `CLAUDE*` and `ANTHROPIC_*` variable, then sets the two config-dir
+variables. The list is prefix-based on purpose: Claude Code adds variables
+faster than an explicit list would keep up, and each one describes the parent
+session, not the child.
+
+**The tool never handles credential material, and makes no network requests.**
+Isolation comes from pointing `CLAUDE_SECURESTORAGE_CONFIG_DIR` at a per-profile
+path; macOS does the rest. `Keychain.serviceName` only *computes* a name for
+diagnostics. Keep it that way: a feature that needs a token or an API call
+should be a separate tool.
 
 **No symlinks below a config root.** Claude Code refuses a symlink at any
 non-leaf component and emits a refusal event, so shared state is copied, never

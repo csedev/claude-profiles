@@ -1,0 +1,8 @@
+# The project has no package dependencies; the only thing to keep current is
+# the GitHub Actions the CI workflow uses.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -16,6 +16,11 @@ private func withTemporaryRoot(_ body: () throws -> Void) rethrows {
     try body()
 }
 
+private func mode(_ url: URL) throws -> Int {
+    try XCTUnwrap(
+        FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int)
+}
+
 final class FingerprintTests: XCTestCase {
     private func write(_ json: String) throws -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -105,6 +110,58 @@ final class GuardTests: XCTestCase {
             XCTAssertNoThrow(try Paths.assertNotDefaultState(Paths.profilesDir.appending(path: "x")))
         }
     }
+
+    /// The "under our root" exemption must not become a bypass: a root at,
+    /// inside, or above Claude's own state is refused outright, for every
+    /// write — otherwise `CLAUDE_PROFILES_ROOT=~/.claude` would make the guard
+    /// wave through the very paths it exists to protect.
+    func testRootOverrideCannotOverlapDefaultState() {
+        let bad = [
+            Paths.defaultConfigDir.path,
+            Paths.defaultConfigDir.appending(path: "profiles").path,
+            Paths.defaultConfigJSON.path,
+            Paths.defaultElectronDir.appending(path: "x").path,
+            Paths.home.path,
+            "/",
+        ]
+        defer { unsetenv(Paths.rootEnvironmentKey) }
+        for root in bad {
+            setenv(Paths.rootEnvironmentKey, root, 1)
+            XCTAssertThrowsError(
+                try Paths.assertNotDefaultState(Paths.profilesDir.appending(path: "x")), root)
+            XCTAssertThrowsError(try Paths.assertNotDefaultState(Paths.defaultConfigJSON), root)
+        }
+    }
+
+    /// A store relocated behind a symlink is still the store. Symlinks are
+    /// resolved on both sides of the comparison — resolving only the target
+    /// made every write under a symlinked `~/.claude-profiles` fail the
+    /// `$HOME` check. A symlink planted inside the store that points back at
+    /// Claude's own state is still refused.
+    func testSymlinksAreResolvedOnBothSides() throws {
+        let fm = FileManager.default
+        // Under $HOME on purpose: that is where the asymmetry bit.
+        let temp = Paths.home.appending(
+            path: "Library/Caches/profilekit-tests-\(UUID().uuidString)")
+        let real = temp.appending(path: "real")
+        let link = temp.appending(path: "link")
+        try fm.createDirectory(at: real, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: link, withDestinationURL: real)
+        defer {
+            try? fm.removeItem(at: temp)
+            unsetenv(Paths.rootEnvironmentKey)
+        }
+        setenv(Paths.rootEnvironmentKey, link.path, 1)
+
+        XCTAssertNoThrow(try Paths.assertNotDefaultState(Paths.profilesDir.appending(path: "x")))
+        XCTAssertNoThrow(try Paths.assertNotDefaultState(real.appending(path: "profiles/x")))
+
+        let escape = real.appending(path: "escape")
+        try fm.createSymbolicLink(at: escape, withDestinationURL: Paths.home)
+        XCTAssertThrowsError(
+            try Paths.assertNotDefaultState(
+                Paths.root.appending(path: "escape/.claude/settings.json")))
+    }
 }
 
 final class ProfileLifecycleTests: XCTestCase {
@@ -154,6 +211,18 @@ final class ProfileLifecycleTests: XCTestCase {
             XCTAssertThrowsError(try ProfileStore.resolve("nope"))
         }
     }
+
+    /// `rm` resolves exactly. A prefix is convenient for `launch`; for a
+    /// destructive command it is a way to delete the wrong profile.
+    func testExactResolutionRejectsPrefixes() throws {
+        try withTemporaryRoot {
+            let work = try ProfileStore.create(label: "work")
+            XCTAssertEqual(try ProfileStore.resolve("work", exact: true).id, work.id)
+            XCTAssertEqual(try ProfileStore.resolve("WORK", exact: true).id, work.id)
+            XCTAssertEqual(try ProfileStore.resolve(work.id.uuidString, exact: true).id, work.id)
+            XCTAssertThrowsError(try ProfileStore.resolve("wo", exact: true))
+        }
+    }
 }
 
 final class AtomicWriteTests: XCTestCase {
@@ -176,6 +245,43 @@ final class AtomicWriteTests: XCTestCase {
     func testRefusesDefaultState() {
         XCTAssertThrowsError(
             try AtomicWrite.write(Data(), to: Paths.defaultConfigJSON))
+    }
+
+    /// Every launch and every sync takes a backup; without pruning, a year of
+    /// daily use leaves hundreds of copies of a file that carries account
+    /// identity and MCP server environments.
+    func testBackupsArePruned() throws {
+        try withTemporaryRoot {
+            let target = Paths.root.appending(path: "f.json")
+            for i in 0..<(AtomicWrite.backupsToKeep + 4) {
+                try AtomicWrite.write(Data("\(i)".utf8), to: target, backup: true)
+                usleep(2000)  // distinct millisecond stamps
+            }
+            let backups = AtomicWrite.backups(of: target)
+            XCTAssertEqual(backups.count, AtomicWrite.backupsToKeep)
+            // Newest first, and the newest holds the write before the last one.
+            XCTAssertEqual(
+                try String(contentsOf: XCTUnwrap(backups.first), encoding: .utf8),
+                "\(AtomicWrite.backupsToKeep + 2)")
+        }
+    }
+
+    /// Files and the directories created for them are readable by this user
+    /// only, and replacing a world-readable file leaves it private.
+    func testWritesArePrivate() throws {
+        try withTemporaryRoot {
+            let target = Paths.sharedDir.appending(path: "nested/f.json")
+            try AtomicWrite.write(Data("x".utf8), to: target)
+            XCTAssertEqual(try mode(target), 0o600)
+            XCTAssertEqual(try mode(target.deletingLastPathComponent()), 0o700)
+            XCTAssertEqual(try mode(Paths.sharedDir), 0o700)
+            XCTAssertEqual(try mode(Paths.root), 0o700)
+
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: target.path)
+            try AtomicWrite.write(Data("y".utf8), to: target)
+            XCTAssertEqual(try mode(target), 0o600)
+        }
     }
 }
 
@@ -364,10 +470,12 @@ final class SettingsMergeTests: XCTestCase {
             try writeConfig(["projects": ["/r": ["hasTrustDialogAccepted": true]]],
                             to: source.paths.configFile)
             try SettingsMerge.captureBack(from: XCTUnwrap(ProfileStore.load(id: source.id)))
-            let log = try String(
-                contentsOf: Paths.journalDir.appending(path: "merge.log"), encoding: .utf8)
+            let file = Paths.journalDir.appending(path: "merge.log")
+            let log = try String(contentsOf: file, encoding: .utf8)
             XCTAssertTrue(log.contains("capture"))
             XCTAssertTrue(log.contains("source"))
+            XCTAssertEqual(try mode(file), 0o600)
+            XCTAssertEqual(try mode(Paths.journalDir), 0o700)
         }
     }
 }
@@ -493,146 +601,6 @@ final class UsageWindowCoverageTests: XCTestCase {
     }
 }
 
-final class UsageAPITests: XCTestCase {
-    /// Shaped from the schema in claude-code 2.1.271:
-    ///   model_scoped: [{ display_name, utilization, resets_at }]
-    /// with display_name "Server-supplied label for the model bucket (e.g. 'Fable')".
-    private let response: [String: Any] = [
-        "limits": [
-            "five_hour": ["utilization": 13, "resets_at": "2026-09-16T03:20:00Z"],
-            "seven_day": ["utilization": 69, "resets_at": "2026-09-20T07:00:00Z"],
-            "seven_day_opus": ["utilization": 4, "resets_at": "2026-09-20T07:00:00Z"],
-            "model_scoped": [
-                ["display_name": "Fable", "utilization": 99, "resets_at": "2026-09-20T07:00:00Z"]
-            ],
-            "extra_usage": ["is_enabled": true, "utilization": 27.19],
-        ]
-    ]
-
-    func testModelScopedProducesTheFableRow() throws {
-        let usage = UsageAPI.parse(response)
-        let fable = try XCTUnwrap(usage.meter("model_scoped:Fable"))
-        XCTAssertEqual(fable.title, "Weekly · Fable")
-        XCTAssertEqual(fable.utilization, 99)
-        XCTAssertNotNil(fable.resetsAt)
-    }
-
-    func testFixedWindowsParsedWithResetTimes() throws {
-        let usage = UsageAPI.parse(response)
-        let fiveHour = try XCTUnwrap(usage.meter("five_hour"))
-        XCTAssertEqual(fiveHour.utilization, 13)
-        XCTAssertEqual(fiveHour.title, "5-hour limit")
-        // Reset times are the other thing the local history file cannot provide.
-        XCTAssertNotNil(fiveHour.resetsAt)
-        XCTAssertEqual(usage.meter("seven_day")?.utilization, 69)
-    }
-
-    func testExtraUsageOnlyWhenEnabled() {
-        XCTAssertNotNil(UsageAPI.parse(response).meter("extra_usage"))
-        let disabled: [String: Any] = [
-            "limits": ["extra_usage": ["is_enabled": false, "utilization": 5]]
-        ]
-        XCTAssertNil(UsageAPI.parse(disabled).meter("extra_usage"))
-    }
-
-    /// The schema calls model_scoped "additive": absent when nothing is known,
-    /// empty when the server listed no per-model window. Neither is an error.
-    func testAbsentAndEmptyModelScopedAreBothFine() {
-        let absent = UsageAPI.parse(["limits": ["five_hour": ["utilization": 1]]])
-        XCTAssertEqual(absent.meters.count, 1)
-
-        let empty = UsageAPI.parse(
-            ["limits": ["five_hour": ["utilization": 1], "model_scoped": []]])
-        XCTAssertEqual(empty.meters.count, 1)
-    }
-
-    func testUnparseableEntriesAreSkippedNotFatal() {
-        let messy: [String: Any] = [
-            "limits": [
-                "five_hour": ["utilization": 10],
-                "seven_day": ["resets_at": "2026-09-20T07:00:00Z"],  // no utilization
-                "model_scoped": [
-                    ["utilization": 5],  // no display_name
-                    ["display_name": "Fable", "utilization": 99],
-                ],
-            ]
-        ]
-        let usage = UsageAPI.parse(messy)
-        XCTAssertNil(usage.meter("seven_day"))
-        XCTAssertEqual(usage.meters.count, 2)
-        XCTAssertEqual(usage.meter("model_scoped:Fable")?.utilization, 99)
-    }
-
-    /// Tolerates a response that is not wrapped in `limits`.
-    func testAcceptsUnwrappedResponse() {
-        let usage = UsageAPI.parse(["five_hour": ["utilization": 42]])
-        XCTAssertEqual(usage.meter("five_hour")?.utilization, 42)
-    }
-
-    /// Polling usage must not itself consume the quota being polled.
-    func testSkipSpendSurvivesURLConstruction() {
-        let url = UsageAPI.endpoint(UsageAPI.path, query: UsageAPI.queryItems)
-        XCTAssertEqual(url.path(), "/api/oauth/usage")
-        XCTAssertEqual(url.query(), "skip_spend=1")
-        // Regression: `URL.appending(path:)` percent-encodes "?", which buried
-        // the query inside the path and produced a 404.
-        XCTAssertFalse(url.absoluteString.contains("%3F"))
-    }
-}
-
-final class TokenStoreTests: XCTestCase {
-    private func skipIfKeychainUnavailable() throws {
-        let probe = UUID()
-        do {
-            try TokenStore.save(token: "probe", for: probe)
-            TokenStore.delete(for: probe)
-        } catch {
-            throw XCTSkip("no usable Keychain in this environment: \(error)")
-        }
-    }
-
-    func testRoundTripAndDelete() throws {
-        // CI runners may have no usable login Keychain.
-        try skipIfKeychainUnavailable()
-        let id = UUID()
-        defer { TokenStore.delete(for: id) }
-
-        XCTAssertNil(TokenStore.load(for: id))
-        XCTAssertFalse(TokenStore.has(id))
-
-        try TokenStore.save(token: "sk-test-value", for: id)
-        XCTAssertEqual(TokenStore.load(for: id), "sk-test-value")
-        XCTAssertTrue(TokenStore.has(id))
-
-        // Saving again must replace, not duplicate.
-        try TokenStore.save(token: "sk-second", for: id)
-        XCTAssertEqual(TokenStore.load(for: id), "sk-second")
-
-        XCTAssertTrue(TokenStore.delete(for: id))
-        XCTAssertNil(TokenStore.load(for: id))
-    }
-
-    func testTokensAreScopedPerProfile() throws {
-        try skipIfKeychainUnavailable()
-        let a = UUID(), b = UUID()
-        defer { TokenStore.delete(for: a); TokenStore.delete(for: b) }
-        try TokenStore.save(token: "token-a", for: a)
-        try TokenStore.save(token: "token-b", for: b)
-        XCTAssertEqual(TokenStore.load(for: a), "token-a")
-        XCTAssertEqual(TokenStore.load(for: b), "token-b")
-    }
-}
-
-final class SecureInputTests: XCTestCase {
-    /// Under test, stdin is not a terminal, so the non-tty path must still read
-    /// normally — otherwise piping a token (or running in CI) would hang.
-    func testNonTTYPathReadsNormally() {
-        XCTAssertEqual(isatty(STDIN_FILENO), 0, "test stdin should not be a tty")
-        // Exercising the read itself would consume the test runner's stdin;
-        // asserting the branch condition is the meaningful part.
-    }
-}
-
 final class ProcessDetectionTests: XCTestCase {
     /// `pgrep` never matches its own ancestors. When this tool runs inside a
     /// Claude Code session the desktop app IS an ancestor, so pgrep reported it
@@ -688,6 +656,8 @@ final class SharedAssetsTests: XCTestCase {
         XCTAssertFalse(SharedAssets.shareableSettingsKeys.contains("hooks"))
         XCTAssertFalse(SharedAssets.shareableSettingsKeys.contains("env"))
         XCTAssertFalse(SharedAssets.shareableSettingsKeys.contains("apiKeyHelper"))
+        // The status line is a shell command too.
+        XCTAssertFalse(SharedAssets.shareableSettingsKeys.contains("statusLine"))
         // Entitlements differ per account; pinning a model the other account
         // cannot use fails at an unhelpful moment.
         XCTAssertFalse(SharedAssets.shareableSettingsKeys.contains("model"))
@@ -703,6 +673,7 @@ final class SharedAssetsTests: XCTestCase {
                     "theme": "dark",
                     "hooks": ["Stop": ["echo pwned"]],
                     "env": ["SECRET": "value"],
+                    "statusLine": ["type": "command", "command": "echo pwned"],
                 ], to: source.appending(path: "settings.json"))
 
             try SharedAssets.captureSettings(fromConfigDir: source)
@@ -718,6 +689,7 @@ final class SharedAssetsTests: XCTestCase {
             XCTAssertEqual(written["theme"] as? String, "dark")
             XCTAssertNil(written["hooks"])
             XCTAssertNil(written["env"])
+            XCTAssertNil(written["statusLine"])
         }
     }
 
@@ -772,5 +744,50 @@ final class SharedAssetsTests: XCTestCase {
         XCTAssertEqual(
             Set(SharedAssets.pluginManifests),
             ["installed_plugins.json", "known_marketplaces.json"])
+    }
+}
+
+final class LauncherEnvironmentTests: XCTestCase {
+    /// Run from a terminal inside a Claude Code session, the CLI inherits that
+    /// session's identity and credentials. None of it may reach the child, or
+    /// the "isolated" profile quietly joins the parent's session, proxy, or
+    /// account.
+    func testChildEnvironmentDropsSessionAndCredentialVariables() throws {
+        try withTemporaryRoot {
+            let profile = try ProfileStore.create(label: "work")
+            let parent = [
+                "HOME": "/Users/x", "PATH": "/usr/bin",
+                "CLAUDE_CODE_SESSION_ID": "s", "CLAUDECODE": "1",
+                "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-x",
+                "ANTHROPIC_API_KEY": "sk-ant-api03-x",
+                "ANTHROPIC_BASE_URL": "https://proxy.example",
+                "CLAUDE_CONFIG_DIR": "/elsewhere",
+                Paths.rootEnvironmentKey: Paths.root.path,
+            ]
+            let env = Launcher.childEnvironment(from: parent, for: profile)
+            XCTAssertEqual(env["HOME"], "/Users/x")
+            XCTAssertEqual(env["PATH"], "/usr/bin")
+            for gone in [
+                "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+            ] {
+                XCTAssertNil(env[gone], gone)
+            }
+            XCTAssertEqual(env["CLAUDE_CONFIG_DIR"], profile.paths.config.path)
+            XCTAssertEqual(
+                env["CLAUDE_SECURESTORAGE_CONFIG_DIR"], profile.paths.credentialScope.path)
+            XCTAssertEqual(env[Paths.rootEnvironmentKey], Paths.root.path)
+        }
+    }
+}
+
+final class TerminalTextTests: XCTestCase {
+    /// Session titles come from transcripts. One with an escape sequence in it
+    /// must not be able to repaint the terminal `sessions` prints to.
+    func testControlCharactersAreStripped() {
+        XCTAssertEqual(TerminalText.sanitize("ok\u{1B}[31mred\u{1B}[0m\u{07}"), "ok[31mred[0m")
+        XCTAssertEqual(TerminalText.sanitize("tab\tnl\n"), "tabnl")
+        XCTAssertEqual(TerminalText.sanitize("c1\u{9B}31m"), "c131m")
+        XCTAssertEqual(TerminalText.sanitize("plain — ünïcode ☁"), "plain — ünïcode ☁")
     }
 }

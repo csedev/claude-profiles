@@ -9,7 +9,7 @@ public struct Check: Sendable {
 
 public enum Doctor {
     /// Claude Code refuses a symlink at any non-leaf component below the config
-    /// root (PHASE0-FINDINGS.md, Discovery B) and emits a refusal event. A
+    /// root and emits a refusal event (observed in 2.1.271). A
     /// symlinked directory is non-leaf for everything under it, so those are the
     /// ones that matter; symlinked files are always leaves.
     public static func symlinkedDirectories(under root: URL, depth: Int = 0) -> [URL] {
