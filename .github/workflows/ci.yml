@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build -v
+
+      # Tests that need a running Claude desktop app or a usable Keychain skip
+      # themselves rather than failing — CI runners have neither.
+      - name: Test
+        run: swift test
+
+      - name: Build app bundle
+        run: ./Scripts/build-app.sh debug
