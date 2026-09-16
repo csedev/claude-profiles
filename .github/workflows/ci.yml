@@ -5,9 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+# The workflow only builds and tests; the token needs nothing beyond checkout.
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest and newest supported toolchains: macos-15 ships Xcode 16,
+        # macos-26 ships Xcode 26.
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -17,8 +27,8 @@ jobs:
       - name: Build
         run: swift build -v
 
-      # Tests that need a running Claude desktop app or a usable Keychain skip
-      # themselves rather than failing — CI runners have neither.
+      # Tests that need a running Claude desktop app skip themselves rather
+      # than failing — CI runners do not have it.
       - name: Test
         run: swift test
 

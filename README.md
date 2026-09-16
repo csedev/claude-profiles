@@ -42,7 +42,7 @@ everything that should be, is.
 
 - macOS (Apple silicon or Intel), Claude desktop app installed at
   `/Applications/Claude.app`
-- Swift 6 / Xcode 26 to build
+- Xcode 16 or newer to build (Swift 6); CI builds on macOS 15 and macOS 26
 - No third-party dependencies
 
 ## Install
@@ -90,7 +90,7 @@ this tool reads it to share settings outward, but never writes to it.
 | Polish (quota alerts, login item) | done |
 
 Verified against two live accounts on Claude desktop `2.110.0` / claude-code
-`2.1.271`. 55 tests passing.
+`2.1.271`. 52 tests passing.
 
 ## CLI
 
@@ -102,9 +102,8 @@ Verified against two live accounts on Claude desktop `2.110.0` / claude-code
 | `usage [<label>]` | Quota detail, all windows, with peaks |
 | `sync` | Share project settings across every profile |
 | `rename <label> <new>` | Rename — safe, directories are stable IDs |
-| `rm <label> --yes` | Delete a profile's local state |
+| `rm <label> --yes` | Delete a profile's local state — exact label or UUID, never a prefix |
 | `sessions [<query>]` | Every session across all profiles, newest first |
-| `token <label>` | Store a usage token (stdin; see SECURITY.md — currently vestigial) |
 | `doctor` | Verify layout, boundaries, version assumptions |
 
 ## How a profile is isolated
@@ -145,6 +144,12 @@ It is an **allowlist, not a denylist**: an unrecognized key stays local, so a
 future Claude Code release cannot silently start leaking new per-account state
 between profiles.
 
+Note what `mcpServers` carries: the command Claude Code runs to start each
+server, and the `env` it is given — which is where MCP API keys usually live.
+Sharing them is the point (a second account with no MCP servers is not much
+use), but it means those values are copied into `shared/projects-settings.json`
+and into every profile. See [SECURITY.md](SECURITY.md).
+
 ## What else `sync` shares
 
 Beyond project settings, three things are account-agnostic and worth carrying:
@@ -159,10 +164,11 @@ Memories copy **newer-or-missing only**, by modification time, so a memory
 written under one profile is never clobbered by an older copy from another.
 Plugin `cache/` and `marketplaces/` are skipped — large and re-fetchable.
 
-Settings use an allowlist, and three exclusions are deliberate:
+Settings use an allowlist, and the exclusions are deliberate:
 
-- **`hooks`** — these execute shell commands. Copying them would silently arm
-  code execution in an account that never opted in.
+- **`hooks`, `statusLine`, `apiKeyHelper`** — each names a shell command Claude
+  Code executes. Copying them would silently arm code execution in an account
+  that never opted in.
 - **`env`** — routinely holds machine-specific paths and secrets.
 - **`model`** — entitlements differ per account, and pinning a model the other
   account cannot use fails at an unhelpful moment.
@@ -178,8 +184,32 @@ sorted-key hash. It deliberately excludes the volatile session telemetry stored
 alongside it, which a live session rewrites every few seconds; hashing the whole
 file yields a value that changes on its own and asserts nothing.
 
-Writes are atomic — temp file, `fsync`, `rename(2)` — with timestamped backups,
-and every merge is recorded in `journal/merge.log`.
+Writes are atomic — temp file, `fsync`, `rename(2)` — with timestamped backups
+(pruned to the newest five per file), and every merge is recorded in
+`journal/merge.log`.
+
+A few more properties worth knowing:
+
+- **Everything the tool creates is private to your user** — directories `0700`,
+  files `0600` — including the shared store, which holds MCP server
+  environments, and the shared memories.
+- **`CLAUDE_PROFILES_ROOT`** relocates the store. A root at, inside, or above
+  Claude's own state is refused outright, so the override cannot be used to
+  talk the guard into writing there. Symlinks are resolved on both sides of
+  every comparison, so a store behind a symlink works and a symlink planted
+  inside the store that points back at `~/.claude` does not.
+- **Launching a profile strips every `CLAUDE*` and `ANTHROPIC_*` variable** from
+  the environment it hands the app, then sets the two config-dir variables.
+  Run from a terminal inside a Claude Code session, the CLI would otherwise
+  pass on that session's ID, OAuth token, and proxy — and the "isolated"
+  profile would quietly join the parent's session or account.
+- **`rm` takes an exact label or UUID**, refuses while that profile's app is
+  running, and leaves Claude Code's Keychain entry for the login alone (this
+  tool never touches it); it prints the `security` command that removes it.
+- **`sync` warns when a profile's app is running.** Both sides rewrite
+  `.claude.json` whole, so whichever writes last wins; nothing is corrupted,
+  but one side's most recent changes can be lost. Quit the app for a clean
+  merge.
 
 ## Known constraints
 
@@ -234,13 +264,15 @@ Claude Code's own Keychain entry — reading it would mean this tool holding the
 credential that *is* your account, in exchange for two extra numbers. Not worth
 it, so the app shows 5-hour and weekly from local history instead.
 
-The client is built and tested (`UsageAPI`, `TokenStore`, the `model_scoped`
-parser) in case a read-only usage scope ever appears. `token <label>` still works
-for storing one.
+An earlier version carried a client for that endpoint behind a `token` command.
+It was removed before the public release so that the tool holds no credential
+of any kind and makes no network requests; it is in the git history should a
+read-only usage scope ever appear.
+
 ## Sessions
 
-`sessions` indexes every transcript across every profile — 455 files, 1.7 GB, in
-about 0.6s, because only the head of each file is read.
+`sessions` indexes every transcript across every profile — on one machine, 455
+files and 1.7 GB in about 0.6s — because only the head of each file is read.
 
 Sessions are **attributed, never merged**. A cloud session (marked ☁) is stamped
 with the account that created it and can only be opened by that account; the

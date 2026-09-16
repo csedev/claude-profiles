@@ -8,8 +8,10 @@ CLI=.build/debug/claude-profiles
 # Pass a project directory that your first account already trusts, ideally one
 # with MCP servers configured — that is what makes the test meaningful.
 PROJECT="${1:-}"
-if [ -z "$PROJECT" ]; then
-  echo "usage: $0 <project-directory-trusted-by-your-first-account>" >&2
+# The label of a managed profile that has already signed in and run a session.
+PROFILE="${2:-}"
+if [ -z "$PROJECT" ] || [ -z "$PROFILE" ]; then
+  echo "usage: $0 <project-directory-trusted-by-your-first-account> <managed-profile-label>" >&2
   exit 2
 fi
 
@@ -62,11 +64,11 @@ check "trust + MCP present, no telemetry leaked" $?
 
 echo
 echo "=== 3. The second account actually ran a session there ==="
-$CLI sessions 2>/dev/null | grep -q "collective"; check "a session exists under 'collective'" $?
+$CLI sessions 2>/dev/null | grep -q "$PROFILE"; check "a session exists under '$PROFILE'" $?
 
 echo
 echo "=== 4. Usage is being tracked for both ==="
-$CLI usage collective 2>/dev/null | grep -qE '[0-9]+ samples'; check "collective has usage samples" $?
+$CLI usage "$PROFILE" 2>/dev/null | grep -qE '[0-9]+ samples'; check "'$PROFILE' has usage samples" $?
 
 echo
 echo "=== 5. Boundaries still sound ==="

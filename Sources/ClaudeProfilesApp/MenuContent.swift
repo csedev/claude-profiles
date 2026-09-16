@@ -1,14 +1,6 @@
 import ProfileKit
 import SwiftUI
 
-extension LiveMeter {
-    /// The bar already says "Weekly"; repeating it in every label wastes the
-    /// narrow column the menu gives us.
-    var shortTitle: String {
-        title.replacingOccurrences(of: "Weekly · ", with: "")
-    }
-}
-
 struct UsageBar: View {
     let title: String
     let percent: Double?
@@ -75,12 +67,8 @@ struct ProfileCard: View {
 
             UsageBar(title: "5-hour", percent: row.fiveHour)
             UsageBar(title: "Weekly", percent: row.weekly)
-            ForEach(row.detailMeters) { meter in
-                UsageBar(title: meter.shortTitle, percent: meter.utilization)
-            }
-            if let resets = row.live?.meter("seven_day")?.resetsAt {
-                Text("Weekly resets \(resets.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption2).foregroundStyle(.tertiary)
+            ForEach(row.extraWindows) { extra in
+                UsageBar(title: extra.window.title, percent: extra.value)
             }
 
             if let count = row.projectCount {
