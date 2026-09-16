@@ -8,7 +8,7 @@ import Foundation
 /// function of the config dir, every `CLAUDE_CONFIG_DIR` automatically gets its
 /// own Keychain entry. We compute the name so `doctor` can show the mapping.
 ///
-/// Observed in Claude Code 2.1.271 (PHASE0-FINDINGS.md, Discovery A):
+/// Observed in Claude Code 2.1.271, by reading the bundled CLI:
 ///
 ///     service = "Claude Code-credentials" + (isDefault ? "" : "-" + sha256(dir)[0..<8])
 ///

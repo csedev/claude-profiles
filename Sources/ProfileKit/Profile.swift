@@ -60,7 +60,7 @@ public enum ProfileError: Error, CustomStringConvertible {
 public enum ProfileStore {
     /// Stable pseudo-identifier for the unmanaged default profile. It owns no
     /// directory, but it still needs an identity for things keyed per account —
-    /// a usage token, for one. Usually it is the account you use most.
+    /// its row in the menu bar, for one. Usually it is the account you use most.
     public static let defaultPseudoID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
 
     /// Labels are user-facing only — directories are UUIDs — but they still go
@@ -108,14 +108,19 @@ public enum ProfileStore {
         allIDs().compactMap(load(id:)).sorted { $0.label.lowercased() < $1.label.lowercased() }
     }
 
-    /// Resolves a label, a label prefix, or a UUID string.
-    public static func resolve(_ needle: String) throws -> Profile {
+    /// Resolves a label, a UUID string, or — unless `exact` — a unique label
+    /// prefix. Destructive commands pass `exact: true`: `rm w --yes` must not
+    /// quietly expand to "work".
+    public static func resolve(_ needle: String, exact: Bool = false) throws -> Profile {
         let profiles = all()
         if let uuid = UUID(uuidString: needle), let hit = profiles.first(where: { $0.id == uuid }) {
             return hit
         }
-        let exact = profiles.filter { $0.label.caseInsensitiveCompare(needle) == .orderedSame }
-        if let only = exact.first, exact.count == 1 { return only }
+        let exactMatches = profiles.filter {
+            $0.label.caseInsensitiveCompare(needle) == .orderedSame
+        }
+        if let only = exactMatches.first, exactMatches.count == 1 { return only }
+        guard !exact else { throw ProfileError.notFound(needle) }
         let prefix = profiles.filter { $0.label.lowercased().hasPrefix(needle.lowercased()) }
         if prefix.count == 1, let only = prefix.first { return only }
         if prefix.count > 1 { throw ProfileError.ambiguous(needle, prefix.map(\.label)) }
@@ -155,11 +160,8 @@ public enum ProfileStore {
         let paths = ProfilePaths(id: meta.id)
         try Paths.assertNotDefaultState(paths.root)
 
-        let fm = FileManager.default
         for dir in [paths.config, paths.electron, paths.credentialScope] {
-            try fm.createDirectory(
-                at: dir, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700])
+            try Paths.createPrivateDirectory(dir)
         }
         try write(meta: meta)
         return Profile(paths: paths, meta: meta, identity: nil, fingerprint: nil)

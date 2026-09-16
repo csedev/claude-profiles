@@ -10,10 +10,11 @@ public enum SharedAssets {
 
     /// User settings safe to share between accounts.
     ///
-    /// An allowlist, like the project keys. Two exclusions are deliberate:
+    /// An allowlist, like the project keys. The exclusions are deliberate:
     ///
-    /// - `hooks` — these execute shell commands. Copying them between profiles
-    ///   would silently arm code execution in an account that never opted in.
+    /// - `hooks`, `statusLine`, `apiKeyHelper` — each names a shell command
+    ///   Claude Code executes. Copying them between profiles would silently
+    ///   arm code execution in an account that never opted in.
     /// - `env` — routinely holds machine-specific paths and secrets.
     ///
     /// `model` is also left out: entitlements differ per account, and pinning a
@@ -25,7 +26,6 @@ public enum SharedAssets {
         "theme",
         "inputNeededNotifEnabled",
         "agentPushNotifEnabled",
-        "statusLine",
         "outputStyle",
         "alwaysThinkingEnabled",
         "autoCompactEnabled",
@@ -111,7 +111,8 @@ public enum SharedAssets {
             .contentModificationDateKey
         ]) else { return 0 }
 
-        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Paths.assertNotDefaultState(destination)
+        try Paths.createPrivateDirectory(destination)
         var copied = 0
         for file in files where file.pathExtension == "md" {
             let target = destination.appending(path: file.lastPathComponent)
@@ -167,7 +168,8 @@ public enum SharedAssets {
     public static func capturePlugins(fromConfigDir dir: URL) throws -> Int {
         let fm = FileManager.default
         let source = dir.appending(path: "plugins")
-        try fm.createDirectory(at: sharedPluginsDir, withIntermediateDirectories: true)
+        try Paths.assertNotDefaultState(sharedPluginsDir)
+        try Paths.createPrivateDirectory(sharedPluginsDir)
         var copied = 0
         for name in pluginManifests {
             let from = source.appending(path: name)
@@ -184,7 +186,8 @@ public enum SharedAssets {
     public static func materializePlugins(into profile: Profile) throws -> Int {
         let fm = FileManager.default
         let destination = profile.paths.config.appending(path: "plugins")
-        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Paths.assertNotDefaultState(destination)
+        try Paths.createPrivateDirectory(destination)
         var written = 0
         for name in pluginManifests {
             let from = sharedPluginsDir.appending(path: name)

@@ -11,9 +11,6 @@ claude-profiles — run multiple Claude accounts side by side
   rename <label> <new>     rename a profile (safe — directories are stable IDs)
   rm <label> --yes         delete a profile's local state
   sessions [<query>]       every session across all profiles, newest first
-  token <label>            store a usage token (reads from stdin, never argv)
-  token <label> --check    report a stored token's shape (never its value)
-  token <label> --remove   forget a stored token
   sync                     share project settings across every profile
   doctor                   verify layout, boundaries, and version assumptions
 
@@ -28,18 +25,6 @@ let signInGuidance = """
      macOS delivers to whichever Claude instance is already running — usually the
      wrong one, so the login hangs. Email login stays inside this window.
 """
-
-/// Bridges the async API into this synchronous CLI.
-func runBlocking<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) throws -> T {
-    let semaphore = DispatchSemaphore(value: 0)
-    nonisolated(unsafe) var result: Result<T, Error>!
-    Task {
-        do { result = .success(try await work()) } catch { result = .failure(error) }
-        semaphore.signal()
-    }
-    semaphore.wait()
-    return try result.get()
-}
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("error: \(message)\n".utf8))
@@ -63,9 +48,13 @@ func usageLine(_ history: UsageHistory?, indent: String) -> String {
     }.joined(separator: "\n")
 }
 
+/// Strings read from Claude's own files are printed through this, so nothing
+/// that came out of a transcript or config can carry a terminal escape.
+func safe(_ text: String?) -> String? { text.map(TerminalText.sanitize) }
+
 func describe(_ profile: Profile) -> String {
     var lines = ["  \(profile.label)\(Launcher.isRunning(profile) ? "  [running]" : "")"]
-    lines.append("    account   \(profile.identity?.email ?? "(no Code session yet)")")
+    lines.append("    account   \(safe(profile.identity?.email) ?? "(no Code session yet)")")
     if let tier = profile.identity?.seatTier { lines.append("    plan      \(tier)") }
     if let fingerprint = profile.fingerprint {
         lines.append("    config    \(fingerprint.describedBriefly)")
@@ -99,7 +88,7 @@ func cmdList() {
         defaultPIDs.isEmpty
         ? "" : "  [running pid \(defaultPIDs.map(String.init).joined(separator: ","))]"
     print("DEFAULT (read-only — this tool never writes to it)\(running)")
-    print("  \(identity?.email ?? "(unknown)")")
+    print("  \(safe(identity?.email) ?? "(unknown)")")
     if let fingerprint { print("    config    \(fingerprint.describedBriefly)") }
     print(usageLine(UsageReader.readDefault(), indent: "    "))
 
@@ -113,33 +102,6 @@ func cmdList() {
 }
 
 func cmdUsage(_ needle: String?) throws {
-    /// Live meters include per-model weekly windows and reset times, neither of
-    /// which the local history file records.
-    func live(_ id: UUID) -> LiveUsage? {
-        guard let token = TokenStore.load(for: id) else { return nil }
-        do {
-            return try runBlocking { try await UsageAPI.fetch(token: token) }
-        } catch {
-            // Surfacing this matters: a silently-swallowed failure looks
-            // identical to having no token at all.
-            print("  live usage unavailable — \(error)")
-            return nil
-        }
-    }
-
-    func reportLive(_ name: String, _ usage: LiveUsage) {
-        print("\(name)  (live)")
-        for meter in usage.meters {
-            let reset =
-                meter.resetsAt.map { " · resets \($0.formatted(date: .abbreviated, time: .shortened))" }
-                ?? ""
-            print(
-                String(
-                    format: "  %-22@ %@ %5.1f%%%@", meter.title as NSString,
-                    bar(meter.utilization) as NSString, meter.utilization, reset as NSString))
-        }
-    }
-
     func report(_ name: String, _ history: UsageHistory?) {
         print("\(name)")
         guard let history else {
@@ -158,39 +120,18 @@ func cmdUsage(_ needle: String?) throws {
                      history.span / 86_400))
     }
 
-    func emit(_ profile: Profile) {
-        if let usage = live(profile.id) {
-            reportLive(profile.label, usage)
-        } else {
-            report(profile.label, UsageReader.read(for: profile))
-            if !TokenStore.has(profile.id) {
-                print("  (local history only — `claude-profiles token \(profile.label)` adds per-model windows)")
-            }
-        }
-    }
-
-    func emitDefault() {
-        if let usage = live(ProfileStore.defaultPseudoID) {
-            reportLive("DEFAULT", usage)
-        } else {
-            report("DEFAULT", UsageReader.readDefault())
-            if !TokenStore.has(ProfileStore.defaultPseudoID) {
-                print("  (local history only — `claude-profiles token default` adds per-model windows)")
-            }
-        }
-    }
-
     if let needle {
         if needle.caseInsensitiveCompare("default") == .orderedSame {
-            emitDefault()
+            report("DEFAULT", UsageReader.readDefault())
         } else {
-            emit(try ProfileStore.resolve(needle))
+            let profile = try ProfileStore.resolve(needle)
+            report(profile.label, UsageReader.read(for: profile))
         }
     } else {
-        emitDefault()
+        report("DEFAULT", UsageReader.readDefault())
         for profile in ProfileStore.all() {
             print("")
-            emit(profile)
+            report(profile.label, UsageReader.read(for: profile))
         }
     }
 }
@@ -216,12 +157,13 @@ func cmdRename(_ needle: String, _ newLabel: String) throws {
 }
 
 func cmdRemove(_ needle: String, confirmed: Bool) throws {
-    let profile = try ProfileStore.resolve(needle)
+    // Exact label or UUID only: `rm w --yes` must not quietly expand to "work".
+    let profile = try ProfileStore.resolve(needle, exact: true)
     guard Launcher.runningPIDs(profile).isEmpty else {
         fail("'\(profile.label)' is running — quit it first")
     }
     guard confirmed else {
-        print("would delete \(profile.paths.root.path)")
+        print("would delete profile '\(profile.label)' at \(profile.paths.root.path)")
         print("  this removes that profile's login, transcripts, and settings.")
         print("  re-run with --yes to confirm.")
         return
@@ -229,83 +171,9 @@ func cmdRemove(_ needle: String, confirmed: Bool) throws {
     let service = Keychain.serviceName(configDir: profile.paths.config, secureStorageDir: profile.paths.credentialScope)
     try ProfileStore.delete(id: profile.id)
     print("deleted profile '\(profile.label)'")
-    print("note: its keychain entry (\(service)) is left in place;")
-    print("      remove it from Keychain Access if you want it gone.")
-}
-
-func cmdToken(_ needle: String, remove: Bool, check: Bool) throws {
-    // The default profile owns no directory but still needs a token slot: it is
-    // usually the busiest account.
-    let isDefault = needle.caseInsensitiveCompare("default") == .orderedSame
-    let id = isDefault ? ProfileStore.defaultPseudoID : try ProfileStore.resolve(needle).id
-    let label = isDefault ? "default" : try ProfileStore.resolve(needle).label
-
-    if check {
-        guard let token = TokenStore.load(for: id) else {
-            print("no token stored for '\(label)'")
-            return
-        }
-        // Shape only — never the value.
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
-        let bad = token.unicodeScalars.filter { !allowed.contains($0) }
-        print("token for '\(label)':")
-        print("  length      \(token.count)")
-        print("  prefix      \(token.prefix(13))…")
-        print("  segments    \(token.split(separator: "-").count)")
-        print("  whitespace  \(token.contains(where: \.isWhitespace) ? "YES — likely a broken copy" : "none")")
-        print("  unexpected  \(bad.isEmpty ? "none" : String(bad.map(Character.init)))")
-        if let result = try? runBlocking({ try await UsageAPI.validate(token: token) }) {
-            print("  validate    HTTP \(result.status) \(result.body.prefix(120))")
-        }
-        return
-    }
-
-    if remove {
-        let existed = TokenStore.delete(for: id)
-        print(existed ? "removed token for '\(label)'" : "no token stored for '\(label)'")
-        return
-    }
-
-    // The default profile needs no env prefix: `claude setup-token` already
-    // runs against it.
-    var envPrefix = ""
-    if !isDefault {
-        let paths = ProfilePaths(id: id)
-        envPrefix =
-            "CLAUDE_CONFIG_DIR=\(paths.config.path) \\\n"
-            + "  CLAUDE_SECURESTORAGE_CONFIG_DIR=\(paths.credentialScope.path) \\\n  "
-    }
-
-    print("""
-        Mint a long-lived token for '\(label)', then paste it below.
-
-          \(envPrefix)claude setup-token
-
-        Input is not echoed. The token never reaches your shell history, the
-        process list, or the terminal scrollback — it goes straight into this
-        tool's own Keychain entry, used only for GET /api/oauth/usage.
-        """)
-    print("token: ", terminator: "")
-
-    guard let token = SecureInput.readSecret()?.trimmingCharacters(in: .whitespaces),
-        !token.isEmpty
-    else {
-        fail("no token provided")
-    }
-    // Piping from the clipboard is the easy path, and the easy path should
-    // fail loudly when the clipboard holds something else.
-    guard token.hasPrefix("sk-ant-"), token.count >= 40 else {
-        fail("""
-            that does not look like a Claude token
-              expected: starts with "sk-ant-", at least 40 characters
-              got:      \(token.count) character(s) starting "\(token.prefix(7))"
-              (copy the token printed by `claude setup-token` and try again)
-            """)
-    }
-
-    try TokenStore.save(token: token, for: id)
-    print("stored token for '\(label)' (\(token.count) characters)")
-    print("run `claude-profiles usage \(label)` to verify it works.")
+    print("note: the login Claude Code stored for it is still in your Keychain, under")
+    print("      service \"\(service)\". This tool never touches that entry; to remove it:")
+    print("      security delete-generic-password -s '\(service)'")
 }
 
 func cmdSessions(_ query: String?) {
@@ -327,8 +195,8 @@ func cmdSessions(_ query: String?) {
                 format: "%@ %-12@ %-11@ %6.1fMB  %@", marker as NSString,
                 record.profileLabel as NSString,
                 formatter.string(from: record.modified) as NSString, size,
-                record.displayTitle as NSString))
-        if let cwd = record.cwd {
+                TerminalText.sanitize(record.displayTitle) as NSString))
+        if let cwd = safe(record.cwd) {
             print("               \(cwd)")
         }
     }
@@ -367,6 +235,14 @@ func cmdSync() throws {
     )
 
     for profile in ProfileStore.all() {
+        if Launcher.isRunning(profile) {
+            // Both sides rewrite .claude.json whole, so whichever writes last
+            // wins. Nothing is corrupted (writes are atomic, and a backup is
+            // taken first), but one side's changes can be lost.
+            print(
+                "  warning: '\(profile.label)' is running — it may overwrite what sync writes, or lose its own recent changes; quit it and re-run sync for a clean merge"
+            )
+        }
         let report = try SettingsMerge.materialize(into: profile)
         let delta =
             report.before?.projectsSHA == report.after?.projectsSHA ? "unchanged" : "updated"
@@ -427,11 +303,6 @@ do {
     case "rm", "remove":
         guard positional.count > 1 else { fail("usage: claude-profiles rm <label> --yes") }
         try cmdRemove(positional[1], confirmed: flags.contains("--yes"))
-    case "token":
-        guard positional.count > 1 else { fail("usage: claude-profiles token <label>") }
-        try cmdToken(
-            positional[1], remove: flags.contains("--remove"),
-            check: flags.contains("--check"))
     case "sessions":
         cmdSessions(positional.count > 1 ? positional[1] : nil)
     case "sync":
