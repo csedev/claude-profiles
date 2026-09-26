@@ -326,6 +326,124 @@ final class UsageTests: XCTestCase {
             ))
         XCTAssertEqual(h.lastReset(.fiveHour), Date(timeIntervalSince1970: 3))
     }
+
+    /// Regression: a window signed in as another account kept appending to the
+    /// same file, so that account's usage — and a fake reset at the switch —
+    /// showed under this profile.
+    func testOnlyTheCurrentOrganizationsSamplesCount() throws {
+        let h = try XCTUnwrap(
+            history(
+                #"{"samples":[{"t":1000,"org":"a","u":{"sd":40}},{"t":2000,"org":"b","u":{"sd":90}},{"t":3000,"org":"a","u":{"sd":45}}]}"#
+            ))
+        XCTAssertEqual(h.org, "a")
+        XCTAssertEqual(h.samples.count, 2)
+        XCTAssertEqual(h.peak(.sevenDay), 45)
+        XCTAssertNil(h.lastReset(.sevenDay))
+    }
+}
+
+private let giraffe = Identity(
+    email: "g@example.com", accountUUID: "acct-g", organizationUUID: "org-g")
+private let collective = Identity(
+    email: "c@example.com", accountUUID: "acct-c", organizationUUID: "org-c")
+
+private func usage(org: String) -> UsageHistory {
+    UsageHistory(samples: [UsageSample(date: .now, org: org, values: [.sevenDay: 10])])
+}
+
+final class AccountTests: XCTestCase {
+    /// Regression: after a window signed out and back in as another account,
+    /// both profiles showed the old one, because `.claude.json` still named it.
+    func testTheAppsAccountWinsOverAStaleCodeConfig() throws {
+        try withTemporaryRoot {
+            var book = AccountBook.load(adding: [giraffe, collective])
+            XCTAssertEqual(
+                book.signedIn(config: collective, usage: usage(org: "org-g"), backups: { [] }),
+                .known(giraffe))
+        }
+    }
+
+    func testConfigIsTrustedWhenItMatchesTheApp() throws {
+        try withTemporaryRoot {
+            var book = AccountBook.load(adding: [])
+            XCTAssertEqual(
+                book.signedIn(config: collective, usage: usage(org: "org-c"), backups: { [] }),
+                .known(collective))
+        }
+    }
+
+    func testWithoutUsageHistoryTheConfigIsAllThereIs() throws {
+        try withTemporaryRoot {
+            var book = AccountBook.load(adding: [])
+            XCTAssertEqual(
+                book.signedIn(config: collective, usage: nil, backups: { [] }), .known(collective))
+            XCTAssertEqual(book.signedIn(config: nil, usage: nil, backups: { [] }), .notSignedIn)
+        }
+    }
+
+    /// Better no email than the wrong one.
+    func testAnUnrecordedOrganizationIsNotMisnamed() throws {
+        try withTemporaryRoot {
+            var book = AccountBook.load(adding: [collective])
+            XCTAssertEqual(
+                book.signedIn(config: collective, usage: usage(org: "org-new"), backups: { [] }),
+                .unrecognized)
+        }
+    }
+
+    func testTwoAccountsInOneOrganizationCannotBeToldApart() throws {
+        try withTemporaryRoot {
+            var colleague = giraffe
+            colleague.accountUUID = "acct-other"
+            var book = AccountBook.load(adding: [giraffe, colleague])
+            XCTAssertEqual(
+                book.signedIn(config: collective, usage: usage(org: "org-g"), backups: { [] }),
+                .unrecognized)
+        }
+    }
+
+    /// Claude Code's backups may be the only record of an account, and they
+    /// rotate within minutes — so what they teach has to be kept.
+    func testBackupsRecoverAnAccountAndTheBookRemembersIt() throws {
+        try withTemporaryRoot {
+            var book = AccountBook.load(adding: [collective])
+            XCTAssertEqual(
+                book.signedIn(config: collective, usage: usage(org: "org-g"), backups: { [giraffe] }),
+                .known(giraffe))
+
+            var reloaded = AccountBook.load(adding: [])
+            XCTAssertEqual(
+                reloaded.signedIn(config: collective, usage: usage(org: "org-g"), backups: { [] }),
+                .known(giraffe))
+            XCTAssertEqual(try mode(AccountBook.file), 0o600)
+        }
+    }
+
+    /// A backup is an older record, so it must not overwrite a current one.
+    func testBackupsDoNotOverwriteCurrentRecords() throws {
+        try withTemporaryRoot {
+            var book = AccountBook.load(adding: [giraffe])
+            var older = giraffe
+            older.email = "old@example.com"
+            book.learn([older], replacing: false)
+            XCTAssertEqual(book.known, [giraffe])
+        }
+    }
+
+    func testBackupFilesFollowClaudeCodesLayout() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appending(path: "backups-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let backups = dir.appending(path: "backups")
+        try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+        for name in [".claude.json.backup.2", ".claude.json.backup.1", "other.json.backup.3"] {
+            try Data("{}".utf8).write(to: backups.appending(path: name))
+        }
+        let config = dir.appending(path: ".claude.json")
+        XCTAssertEqual(
+            AccountBook.backupFiles(configDir: dir, configFile: config).map(\.lastPathComponent),
+            [".claude.json.backup.1", ".claude.json.backup.2", ".claude.json.backup"])
+    }
 }
 
 final class SettingsMergeTests: XCTestCase {

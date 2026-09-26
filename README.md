@@ -90,7 +90,7 @@ this tool reads it to share settings outward, but never writes to it.
 | Polish (quota alerts, login item) | done |
 
 Verified against two live accounts on Claude desktop `2.110.0` / claude-code
-`2.1.271`. 54 tests passing.
+`2.1.271`. 63 tests passing.
 
 ## CLI
 
@@ -219,6 +219,11 @@ app bundle, so an OAuth callback goes to whichever instance is already running.
 SSO will hang. A deep-link router that dispatches callbacks by OAuth `state` is
 the real fix; it is backlog.
 
+The same goes for **signing in again when a window's session expires.** Finish
+that in the browser and the window comes back signed in as whichever account the
+browser is using — another profile's, if that is the one you use there. Sign out
+of the window and back in with email + code instead.
+
 **Accounts cannot see each other's sessions.** The desktop app partitions its Code
 session list by account UUID, and session groups are server-side. No local tool
 can merge those views — which is why this tool puts the cross-account view in its
@@ -226,6 +231,24 @@ own UI instead.
 
 **Never symlink below a config root.** Claude Code refuses a symlink at any
 non-leaf component. `doctor` asserts this.
+
+## Which account a profile shows
+
+Each profile shows the account its desktop app is signed in to *now*. That comes
+from the app's usage file, not from `.claude.json`: Claude Code records an
+account there only when one of its sessions runs, so after a window signs in as
+someone else, `.claude.json` goes on naming the previous account. The usage file
+tags every sample with the organization it was fetched for, and the app writes
+one as soon as it signs in.
+
+Turning an organization back into an email takes a record of that account. The
+tool keeps one in `accounts.json` in its store, learned from every `.claude.json`
+on the machine and, for an organization none of them names, from Claude Code's
+own backups of them. An account nothing has recorded yet shows as signed in,
+without an email, until a Code session runs in that window.
+
+Usage follows the same rule: only samples from the organization signed in now
+count, so one account's usage never shows under another.
 
 ## Usage windows
 

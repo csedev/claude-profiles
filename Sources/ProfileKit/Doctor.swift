@@ -60,22 +60,27 @@ public enum Doctor {
             ))
 
         let (identity, fingerprint) = ProfileStore.defaultProfile()
+        let profiles = ProfileStore.all()
+        var accounts = AccountBook.load(adding: [identity] + profiles.map(\.identity))
+        let defaultAccount = accounts.signedIn(config: identity, usage: UsageReader.readDefault())
         checks.append(
             Check(
                 severity: fingerprint == nil ? .warn : .ok, label: "default profile",
                 detail: fingerprint.map {
-                    "\(identity?.email ?? "unknown") · \($0.describedBriefly) — must be unchanged by any operation"
+                    "\(defaultAccount.summary) · \($0.describedBriefly) — must be unchanged by any operation"
                 } ?? "could not read \(Paths.defaultConfigJSON.path)"))
 
-        for profile in ProfileStore.all() {
+        for profile in profiles {
             let hasDirs =
                 fm.fileExists(atPath: profile.paths.config.path)
                 && fm.fileExists(atPath: profile.paths.electron.path)
+            let account = accounts.signedIn(
+                config: profile.identity, usage: UsageReader.read(for: profile))
             checks.append(
                 Check(
                     severity: hasDirs ? .ok : .fail, label: "profile \(profile.label)",
                     detail: hasDirs
-                        ? "\(profile.identity?.email ?? "(no Code session yet)") · keychain: \(Keychain.serviceName(configDir: profile.paths.config, secureStorageDir: profile.paths.credentialScope))"
+                        ? "\(account.summary) · keychain: \(Keychain.serviceName(configDir: profile.paths.config, secureStorageDir: profile.paths.credentialScope))"
                         : "missing config/ or electron/"))
 
             let bad = symlinkedDirectories(under: profile.paths.config)
@@ -88,7 +93,7 @@ public enum Doctor {
                         : "Claude Code will REFUSE: \(bad.map(\.path).joined(separator: ", "))"))
         }
 
-        if ProfileStore.all().isEmpty {
+        if profiles.isEmpty {
             checks.append(
                 Check(
                     severity: .ok, label: "profiles",
