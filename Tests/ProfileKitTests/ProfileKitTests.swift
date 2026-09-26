@@ -779,6 +779,31 @@ final class LauncherEnvironmentTests: XCTestCase {
             XCTAssertEqual(env[Paths.rootEnvironmentKey], Paths.root.path)
         }
     }
+
+    /// The default profile starts through `open`, which passes its caller's
+    /// environment on to the app. A menu bar app started from a Claude Code
+    /// session carries a managed profile's config dirs; passed on, they would
+    /// bind Claude's own window to that profile's config and Keychain entry.
+    func testDefaultEnvironmentIsStrippedAndSetsNoConfigDir() {
+        let parent = [
+            "HOME": "/Users/x", "PATH": "/usr/bin",
+            "CLAUDE_CODE_SESSION_ID": "s", "CLAUDECODE": "1",
+            "ANTHROPIC_BASE_URL": "https://proxy.example",
+            "CLAUDE_CONFIG_DIR": "/store/profiles/work/config",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/store/profiles/work/credentials",
+            Paths.rootEnvironmentKey: "/store",
+        ]
+        XCTAssertEqual(
+            Launcher.defaultChildEnvironment(from: parent),
+            ["HOME": "/Users/x", "PATH": "/usr/bin", Paths.rootEnvironmentKey: "/store"])
+    }
+
+    /// Regression: plain `open -a` activates any running Claude instead of
+    /// starting one, and a managed profile's instance counts — so with any
+    /// profile up, the default's Launch button only focused that profile.
+    func testDefaultLaunchStartsANewInstance() {
+        XCTAssertEqual(Launcher.defaultLaunchArguments, ["-n", "-a", "/Applications/Claude.app"])
+    }
 }
 
 final class TerminalTextTests: XCTestCase {
