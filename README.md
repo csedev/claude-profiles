@@ -90,7 +90,7 @@ this tool reads it to share settings outward, but never writes to it.
 | Polish (quota alerts, login item) | done |
 
 Verified against two live accounts on Claude desktop `2.110.0` / claude-code
-`2.1.271`. 52 tests passing.
+`2.1.271`. 54 tests passing.
 
 ## CLI
 

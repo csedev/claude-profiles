@@ -7,10 +7,15 @@ public struct LaunchResult: Sendable {
 
 public enum LaunchError: Error, CustomStringConvertible {
     case appMissing(URL)
+    case openFailed(status: Int32, message: String)
     public var description: String {
         switch self {
         case .appMissing(let u):
             return "Claude desktop app not found at \(u.path)"
+        case .openFailed(let status, let message):
+            return message.isEmpty
+                ? "could not start Claude (open exited \(status))"
+                : "could not start Claude: \(message)"
         }
     }
 }
@@ -26,22 +31,26 @@ public enum Launcher {
     /// one it signed in with, and `ANTHROPIC_BASE_URL` would route it through
     /// the parent's proxy. All of these are present when this tool runs from a
     /// terminal inside a Claude Code session. Stripping by prefix leaves the
-    /// child with what it sees when launched from the Dock — the same baseline
-    /// the default profile gets via `open -a`.
+    /// child with what it sees when launched from the Dock.
     static let strippedPrefixes = ["CLAUDE_", "CLAUDECODE", "ANTHROPIC_"]
 
     /// Ours, and harmless to pass on: a relocated store stays relocated for
     /// anything the child runs.
     static let keptDespitePrefix: Set<String> = [Paths.rootEnvironmentKey]
 
+    /// The parent's environment minus everything Claude Code reads.
+    static func strippedEnvironment(from parent: [String: String]) -> [String: String] {
+        parent.filter { key, _ in
+            keptDespitePrefix.contains(key) || !strippedPrefixes.contains { key.hasPrefix($0) }
+        }
+    }
+
     /// The environment a profile's app is launched with.
     public static func childEnvironment(
         from parent: [String: String] = ProcessInfo.processInfo.environment,
         for profile: Profile
     ) -> [String: String] {
-        var env = parent.filter { key, _ in
-            keptDespitePrefix.contains(key) || !strippedPrefixes.contains { key.hasPrefix($0) }
-        }
+        var env = strippedEnvironment(from: parent)
         env["CLAUDE_CONFIG_DIR"] = profile.paths.config.path
         env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = profile.paths.credentialScope.path
         return env
@@ -140,17 +149,52 @@ public enum Launcher {
 
     public static var isDefaultRunning: Bool { !defaultRunningPIDs().isEmpty }
 
-    /// Launches or focuses the default profile.
+    /// The environment the default profile's app is launched with: stripped
+    /// like any profile's, and with no config-dir variables set, so the app
+    /// falls back to Claude's own state exactly as it does from the Dock.
+    public static func defaultChildEnvironment(
+        from parent: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        strippedEnvironment(from: parent)
+    }
+
+    /// `-n` is what makes the default start at all. Plain `open -a` activates
+    /// any running instance of the bundle rather than starting one, and to
+    /// LaunchServices a managed profile's instance is simply Claude — so while
+    /// any profile was up, launching the default only brought that profile's
+    /// window forward. The flip side: `-n` starts a second instance even when
+    /// the default is already running, and Claude takes no single-instance
+    /// lock of its own, so check `defaultRunningPIDs()` first and focus instead.
+    static var defaultLaunchArguments: [String] { ["-n", "-a", Paths.appBundle.path] }
+
+    /// Starts the desktop app on Claude's own state — the default profile.
     ///
-    /// `open -a` does both: it activates a running instance rather than
-    /// starting a second one, and passes no environment overrides, so the app
-    /// uses Claude's own config exactly as it would if opened from the Dock.
-    public static func launchOrFocusDefault() throws {
+    /// Through `open`, so the app starts the way it does from the Dock rather
+    /// than as a child of this process. But `open` hands the app its caller's
+    /// environment, not the Dock's, so it gets the stripped one: this process,
+    /// if started from a Claude Code session, carries that session's
+    /// `CLAUDE_CONFIG_DIR` — another profile's — and the default window would
+    /// otherwise run its Code sessions there.
+    public static func launchDefault() throws {
+        guard FileManager.default.fileExists(atPath: Paths.appBinary.path) else {
+            throw LaunchError.appMissing(Paths.appBinary)
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-a", "/Applications/Claude.app"]
+        process.arguments = defaultLaunchArguments
+        process.environment = defaultChildEnvironment()
+        // The app does not inherit this pipe, so it closes when `open` exits.
+        let stderr = Pipe()
+        process.standardError = stderr
         try process.run()
+        let message = stderr.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw LaunchError.openFailed(
+                status: process.terminationStatus,
+                message: String(decoding: message, as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines))
+        }
     }
 
     static let appMainBinary = "Claude.app/Contents/MacOS/Claude"

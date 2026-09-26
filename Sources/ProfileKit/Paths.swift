@@ -34,8 +34,9 @@ public enum Paths {
         home.appending(path: "Library/Application Support/Claude")
     }
 
-    public static let appBinary = URL(
-        fileURLWithPath: "/Applications/Claude.app/Contents/MacOS/Claude")
+    public static let appBundle = URL(
+        fileURLWithPath: "/Applications/Claude.app", isDirectory: true)
+    public static let appBinary = appBundle.appending(path: "Contents/MacOS/Claude")
 
     public enum GuardError: Error, CustomStringConvertible {
         case touchesDefaultState(URL)

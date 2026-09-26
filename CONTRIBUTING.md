@@ -65,7 +65,16 @@ cannot expand to "work".
 strips every `CLAUDE*` and `ANTHROPIC_*` variable, then sets the two config-dir
 variables. The list is prefix-based on purpose: Claude Code adds variables
 faster than an explicit list would keep up, and each one describes the parent
-session, not the child.
+session, not the child. The default profile is no exception: it starts through
+`open`, which passes on its caller's environment rather than the Dock's, so it
+gets `Launcher.defaultChildEnvironment` — the same stripping, no config dir set.
+
+**The default profile starts with `open -n`, and only when it is not running.**
+Plain `open -a` activates any running instance of the bundle, and a managed
+profile's instance is one, so with any profile up the default never starts.
+`-n` has the opposite trap: Claude takes no single-instance lock, so a second
+default instance would share the first one's user-data-dir. Focus a running one
+by PID instead.
 
 **The tool never handles credential material, and makes no network requests.**
 Isolation comes from pointing `CLAUDE_SECURESTORAGE_CONFIG_DIR` at a per-profile

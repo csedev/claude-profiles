@@ -124,9 +124,13 @@ final class ProfilesModel {
 
     func launch(_ row: ProfileRow) {
         if row.isDefault {
-            // The default profile is Claude's own state: launch it with no
-            // environment overrides, exactly as opening it from the Dock would.
-            do { try Launcher.launchOrFocusDefault() } catch {
+            // The default profile is Claude's own state: launched with no
+            // config-dir overrides, exactly as opening it from the Dock would.
+            // `launchDefault` always starts a new instance, so focus a running one.
+            do {
+                let pids = Launcher.defaultRunningPIDs()
+                if pids.isEmpty { try Launcher.launchDefault() } else { focus(pids) }
+            } catch {
                 errorMessage = String(describing: error)
             }
             refresh()
@@ -136,7 +140,7 @@ final class ProfilesModel {
         do {
             if Launcher.isRunning(profile) {
                 // Already up — bring it forward rather than starting a second copy.
-                focus(profile)
+                focus(Launcher.runningPIDs(profile))
             } else {
                 try Launcher.launch(profile)
             }
@@ -146,8 +150,10 @@ final class ProfilesModel {
         }
     }
 
-    private func focus(_ profile: Profile) {
-        let pids = Set(Launcher.runningPIDs(profile))
+    /// By PID, never by bundle: to macOS every profile's window is the same
+    /// app, so anything bundle-based activates whichever instance it finds first.
+    private func focus(_ pids: [Int32]) {
+        let pids = Set(pids)
         for app in NSWorkspace.shared.runningApplications
         where pids.contains(app.processIdentifier) {
             app.activate()
