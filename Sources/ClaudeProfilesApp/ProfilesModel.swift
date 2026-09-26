@@ -6,14 +6,16 @@ import SwiftUI
 struct ProfileRow: Identifiable, Equatable {
     let id: UUID
     let label: String
-    let email: String?
-    let seatTier: String?
+    /// Who the profile's app is signed in as now — not whoever its last Code
+    /// session ran as, which is all `.claude.json` records.
+    let account: SignedInAccount
     let isRunning: Bool
     let usage: UsageHistory?
     let projectCount: Int?
     /// The unmanaged default profile cannot be launched or renamed by this tool.
     let isDefault: Bool
 
+    var email: String? { account.identity?.email }
     var fiveHour: Double? { usage?.current(.fiveHour) }
     var weekly: Double? { usage?.current(.sevenDay) }
 
@@ -74,27 +76,29 @@ final class ProfilesModel {
 
     func refresh() {
         let (identity, fingerprint) = ProfileStore.defaultProfile()
+        let profiles = ProfileStore.all()
+        var accounts = AccountBook.load(adding: [identity] + profiles.map(\.identity))
+        let defaultUsage = UsageReader.readDefault()
         var built: [ProfileRow] = [
             ProfileRow(
                 id: ProfileStore.defaultPseudoID,
                 label: "Default",
-                email: identity?.email,
-                seatTier: identity?.seatTier,
+                account: accounts.signedIn(config: identity, usage: defaultUsage),
                 isRunning: Launcher.isDefaultRunning,
-                usage: UsageReader.readDefault(),
+                usage: defaultUsage,
                 projectCount: fingerprint?.projects,
                 isDefault: true)
         ]
 
-        for profile in ProfileStore.all() {
+        for profile in profiles {
+            let usage = UsageReader.read(for: profile)
             built.append(
                 ProfileRow(
                     id: profile.id,
                     label: profile.label,
-                    email: profile.identity?.email,
-                    seatTier: profile.identity?.seatTier,
+                    account: accounts.signedIn(config: profile.identity, usage: usage),
                     isRunning: Launcher.isRunning(profile),
-                    usage: UsageReader.read(for: profile),
+                    usage: usage,
                     projectCount: profile.fingerprint?.projects,
                     isDefault: false))
         }

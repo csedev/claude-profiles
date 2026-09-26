@@ -90,6 +90,13 @@ linked. `Doctor` asserts this per profile.
 ancestors, so when this code runs inside a Claude Code session it cannot see the
 desktop app hosting it — silently, and only in that context.
 
+**A profile's account comes from its usage file, not `.claude.json`.**
+`oauthAccount` is Claude Code's record, rewritten only when one of its sessions
+runs, so it goes on naming an account the window has since signed out of. The
+latest usage sample's organization is the live answer; `AccountBook` maps it
+back to an email and prefers no email to the wrong one. Usage is read the same
+way — only the current organization's samples count.
+
 **The projects fingerprint hashes the projects map alone.** The rest of
 `.claude.json` carries session telemetry that a live session rewrites every few
 seconds; hashing the whole file produces a value that changes on its own and

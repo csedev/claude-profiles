@@ -134,7 +134,14 @@ public enum UsageReader {
                 org: entry["org"] as? String, values: values)
         }.sorted { $0.date < $1.date }
 
-        return samples.isEmpty ? nil : UsageHistory(samples: samples)
+        // One file per user-data-dir, whoever that app is signed in as: sign in
+        // as someone else and it keeps appending, tagging each sample with the
+        // organization it was fetched for. Only the current organization's
+        // samples describe the account signed in now — another account's would
+        // show its usage here, and fake a reset at the switch.
+        let current = samples.last?.org
+        let own = samples.filter { $0.org == current }
+        return own.isEmpty ? nil : UsageHistory(samples: own)
     }
 
     public static func read(for profile: Profile) -> UsageHistory? {

@@ -35,6 +35,11 @@ Profiles live under `~/.claude-profiles`. Nothing is uploaded anywhere. The
 journal at `~/.claude-profiles/journal/merge.log` records which projects were
 merged and when — labels and counts, not file contents.
 
+`~/.claude-profiles/accounts.json` records each account seen on this machine —
+email, display name, organization, and their IDs, as `.claude.json` names them —
+so a profile can still be named after its app switches accounts. It holds no
+credential.
+
 Everything the tool creates is readable by your user only: directories are
 `0700`, files `0600`, and replacing a file that was more permissive leaves it
 `0600`. Timestamped backups are taken before every rewrite and pruned to the

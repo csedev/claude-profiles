@@ -52,14 +52,14 @@ func usageLine(_ history: UsageHistory?, indent: String) -> String {
 /// that came out of a transcript or config can carry a terminal escape.
 func safe(_ text: String?) -> String? { text.map(TerminalText.sanitize) }
 
-func describe(_ profile: Profile) -> String {
+func describe(_ profile: Profile, account: SignedInAccount, usage: UsageHistory?) -> String {
     var lines = ["  \(profile.label)\(Launcher.isRunning(profile) ? "  [running]" : "")"]
-    lines.append("    account   \(safe(profile.identity?.email) ?? "(no Code session yet)")")
-    if let tier = profile.identity?.seatTier { lines.append("    plan      \(tier)") }
+    lines.append("    account   \(TerminalText.sanitize(account.summary))")
+    if let tier = account.identity?.seatTier { lines.append("    plan      \(tier)") }
     if let fingerprint = profile.fingerprint {
         lines.append("    config    \(fingerprint.describedBriefly)")
     }
-    lines.append(usageLine(UsageReader.read(for: profile), indent: "    "))
+    lines.append(usageLine(usage, indent: "    "))
     return lines.joined(separator: "\n")
 }
 
@@ -83,22 +83,28 @@ func cmdAdd(_ label: String, launch: Bool) throws {
 
 func cmdList() {
     let (identity, fingerprint) = ProfileStore.defaultProfile()
+    let profiles = ProfileStore.all()
+    var accounts = AccountBook.load(adding: [identity] + profiles.map(\.identity))
+    let defaultUsage = UsageReader.readDefault()
     let defaultPIDs = Launcher.defaultRunningPIDs()
     let running =
         defaultPIDs.isEmpty
         ? "" : "  [running pid \(defaultPIDs.map(String.init).joined(separator: ","))]"
     print("DEFAULT (read-only — this tool never writes to it)\(running)")
-    print("  \(safe(identity?.email) ?? "(unknown)")")
+    print("  \(TerminalText.sanitize(accounts.signedIn(config: identity, usage: defaultUsage).summary))")
     if let fingerprint { print("    config    \(fingerprint.describedBriefly)") }
-    print(usageLine(UsageReader.readDefault(), indent: "    "))
+    print(usageLine(defaultUsage, indent: "    "))
 
-    let profiles = ProfileStore.all()
     print("\nMANAGED PROFILES (\(profiles.count))")
     if profiles.isEmpty {
         print("  none — create one with `claude-profiles add <label>`")
         return
     }
-    for profile in profiles { print(describe(profile)) }
+    for profile in profiles {
+        let usage = UsageReader.read(for: profile)
+        let account = accounts.signedIn(config: profile.identity, usage: usage)
+        print(describe(profile, account: account, usage: usage))
+    }
 }
 
 func cmdUsage(_ needle: String?) throws {

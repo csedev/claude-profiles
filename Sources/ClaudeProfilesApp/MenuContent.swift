@@ -61,7 +61,7 @@ struct ProfileCard: View {
                     .font(.caption)
             }
 
-            Text(row.email ?? "not signed in")
+            Text(row.account.summary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

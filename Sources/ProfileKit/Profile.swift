@@ -20,7 +20,7 @@ public struct ProfileMeta: Codable, Sendable, Equatable {
 }
 
 /// The account bound to a profile, read from its `.claude.json`.
-public struct Identity: Sendable, Equatable {
+public struct Identity: Sendable, Equatable, Codable {
     public var email: String?
     public var displayName: String?
     public var organizationName: String?
